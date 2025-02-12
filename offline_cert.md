@@ -6,28 +6,13 @@ Este guia detalha o processo de configuração da autenticação de um microserv
 ## 1. Obtendo o Certificado no RHSSO
 O RHSSO utiliza certificados para assinar os tokens JWT. Para validar a autenticidade dos tokens, é necessário obter o certificado público do servidor RHSSO.
 
-### 1.1. Acessando a Chave Pública do RHSSO
-1. Acesse a URL do RHSSO:
+### 1.1. Obtendo o Certificado Manualmente
+1. Solicite o certificado ao administrador do RHSSO ou exporte-o manualmente se tiver acesso.
+2. O certificado geralmente está no formato **PEM** ou **CRT**. Se necessário, converta-o para PEM com o seguinte comando:
    ```sh
-   https://<RHSSO_HOST>/auth/realms/<REALM>/protocol/openid-connect/certs
+   openssl x509 -inform DER -in certificado.crt -out certificado.pem
    ```
-2. O retorno será um JSON contendo a chave pública (JWKS), por exemplo:
-   ```json
-   {
-       "keys": [
-           {
-               "kty": "RSA",
-               "kid": "xyz123",
-               "use": "sig",
-               "alg": "RS256",
-               "n": "<BASE64_PUBLIC_KEY>",
-               "e": "AQAB"
-           }
-       ]
-   }
-   ```
-3. Copie o valor da chave "n" e converta para formato **PEM** (OpenSSL pode ser usado para isso).
-4. Salve o certificado no diretório `src/main/resources/certs` do projeto.
+3. Salve o certificado em `src/main/resources/certs/rhsso-public.pem` dentro do seu projeto Spring Boot.
 
 ## 2. Configurando o Certificado no Spring Boot
 
@@ -61,59 +46,52 @@ spring:
       resourceserver:
         jwt:
           issuer-uri: https://<RHSSO_HOST>/auth/realms/<REALM>
-          jwk-set-uri: https://<RHSSO_HOST>/auth/realms/<REALM>/protocol/openid-connect/certs
+          jwk-set-uri: file:src/main/resources/certs/rhsso-public.pem
 ```
 
-### 2.3. Configurando Audience Validation no Spring Security
-Crie uma classe de configuração para validar audiences no JWT.
+### 2.3. Configurando a Leitura do Certificado Manualmente
+Crie um `JwtDecoder` personalizado para carregar o certificado manualmente.
 
 ```java
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.security.config.annotation.web.builders.HttpSecurity;
-import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
-import org.springframework.security.oauth2.server.resource.authentication.JwtGrantedAuthoritiesConverter;
-import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
+import org.springframework.security.oauth2.jwt.JwtValidators;
+import java.security.interfaces.RSAPublicKey;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
+import java.io.InputStream;
 
 @Configuration
-public class SecurityConfig {
+public class JwtConfig {
 
     @Bean
-    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
-        http
-            .authorizeHttpRequests(authz -> authz
-                .requestMatchers("/public/**").permitAll()
-                .anyRequest().authenticated()
-            )
-            .oauth2ResourceServer(oauth2 -> oauth2
-                .jwt(jwtConfigurer -> jwtConfigurer
-                    .jwtAuthenticationConverter(jwtAuthenticationConverter())
-                )
-            );
+    public JwtDecoder jwtDecoder() throws Exception {
+        InputStream certStream = new ClassPathResource("certs/rhsso-public.pem").getInputStream();
+        CertificateFactory certFactory = CertificateFactory.getInstance("X.509");
+        X509Certificate certificate = (X509Certificate) certFactory.generateCertificate(certStream);
+        RSAPublicKey publicKey = (RSAPublicKey) certificate.getPublicKey();
 
-        return http.build();
-    }
-
-    @Bean
-    public JwtAuthenticationConverter jwtAuthenticationConverter() {
-        JwtGrantedAuthoritiesConverter grantedAuthoritiesConverter = new JwtGrantedAuthoritiesConverter();
-        grantedAuthoritiesConverter.setAuthorityPrefix("ROLE_");
-        grantedAuthoritiesConverter.setAuthoritiesClaimName("roles");
-
-        JwtAuthenticationConverter authenticationConverter = new JwtAuthenticationConverter();
-        authenticationConverter.setJwtGrantedAuthoritiesConverter(grantedAuthoritiesConverter);
-        return authenticationConverter;
+        return NimbusJwtDecoder.withPublicKey(publicKey).build();
     }
 }
 ```
 
-### 2.4. Validando o Audience no Token
-Crie um filtro para garantir que o JWT tenha o **audience** correto.
+### 2.4. Configurando Audience Validation no Spring Security
+Crie uma classe de configuração para validar audiences no JWT.
 
 ```java
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.jwt.OAuth2Error;
+import org.springframework.security.oauth2.jwt.OAuth2TokenValidator;
+import org.springframework.security.oauth2.jwt.OAuth2TokenValidatorResult;
+import org.springframework.stereotype.Component;
+import java.util.List;
+
 @Component
 public class AudienceValidator implements OAuth2TokenValidator<Jwt> {
-
     private final List<String> allowedAudiences = List.of("my-service-audience");
 
     @Override
@@ -149,5 +127,5 @@ curl -X GET "http://localhost:8080/api/protected" \
 Se tudo estiver correto, a API responderá com sucesso.
 
 ## Conclusão
-Agora seu microservice Spring está configurado para autenticação e autorização com RHSSO utilizando **audiences** e **certificados**. Isso garante que apenas tokens válidos e destinados ao seu serviço sejam aceitos.
+Agora seu microservice Spring está configurado para autenticação e autorização com RHSSO utilizando **audiences** e **certificados**, sem depender do acesso direto ao RHSSO na K8s.
 
